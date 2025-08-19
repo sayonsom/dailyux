@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.python-version
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+*.whl
+pip-wheel-metadata/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Type checking / linters
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Envs / secrets
+.env
+.env.*
+!.env.example
+*.env.local
+.envrc
+.secrets/
+secrets.*
+
+# Logs / runtime
+*.log
+logs/
+tmp/
+temp/
+.cache/
+
+# OS (macOS)
+.DS_Store
+
+# Editors / IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Docker (keep core files tracked)
+docker-compose.override.yml
+**/.docker/
+**/docker-data/
+!Dockerfile
+!docker-compose.yml
+
+# Certificates / keys
+*.pem
+*.crt
+*.key
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
