@@ -26,9 +26,14 @@ This application is now fully containerized and ready for cloud deployment.
 Create a `.env` file:
 ```bash
 GOOGLE_API_KEY=your_actual_api_key
-GEMINI_MODEL=gemini-1.5-pro
+GEMINI_MODEL=gemini-2.5-pro
 TZ=Asia/Kolkata
+LLM_MODE=client  # default; ensures server never calls LLMs
 ```
+
+Notes:
+- The Dockerfile and docker-compose default to `LLM_MODE=client` so backend won’t call Gemini.
+- You can override at runtime by setting `LLM_MODE=server` (for local/dev only).
 
 ### Cloud Deployment Options
 
@@ -43,7 +48,7 @@ gcloud run deploy dailyux-backend \
   --platform managed \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars GOOGLE_API_KEY=your_key,GEMINI_MODEL=gemini-1.5-pro
+  --set-env-vars LLM_MODE=client,GEMINI_MODEL=gemini-2.5-pro
 ```
 
 #### 2. AWS ECS/Fargate
@@ -53,7 +58,9 @@ aws ecr get-login-password --region us-east-1 | docker login --username AWS --pa
 docker tag dailyux-backend:latest YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/dailyux-backend:latest
 docker push YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/dailyux-backend:latest
 
-# Create ECS task definition and service
+# Ensure task definition env:
+#   LLM_MODE=client
+#   GEMINI_MODEL=gemini-2.5-pro
 ```
 
 #### 3. Azure Container Instances
@@ -67,7 +74,7 @@ az container create \
   --name dailyux-backend \
   --image YOUR_REGISTRY.azurecr.io/dailyux-backend:latest \
   --ports 8000 \
-  --environment-variables GOOGLE_API_KEY=your_key
+  --environment-variables LLM_MODE=client GEMINI_MODEL=gemini-2.5-pro
 ```
 
 #### 4. DigitalOcean App Platform
@@ -85,21 +92,11 @@ services:
   instance_count: 1
   instance_size_slug: basic-xxs
   envs:
-  - key: GOOGLE_API_KEY
-    value: your_key
-    type: SECRET
+  - key: LLM_MODE
+    value: client
+  - key: GEMINI_MODEL
+    value: gemini-2.5-pro
   http_port: 8080
-```
-
-#### 5. Railway
-```bash
-# Install Railway CLI
-npm install -g @railway/cli
-
-# Deploy
-railway login
-railway init
-railway up
 ```
 
 ### Production Considerations
@@ -107,7 +104,7 @@ railway up
 1. **Security:**
    - Use secrets management (AWS Secrets Manager, Google Secret Manager, etc.)
    - Enable HTTPS with proper SSL certificates
-   - Configure CORS appropriately
+   - Configure CORS appropriately (currently permissive for dev)
    - Use non-root user (already configured in Dockerfile)
 
 2. **Scaling:**
@@ -145,7 +142,6 @@ uvicorn app.main:app --reload
 
 ### Container Features
 
-✅ **Multi-stage optimized build**  
 ✅ **Security hardened** (non-root user)  
 ✅ **Health checks** configured  
 ✅ **Environment variable** support  
@@ -153,4 +149,48 @@ uvicorn app.main:app --reload
 ✅ **Docker Compose** for local development  
 ✅ **Cloud deployment** ready  
 
-The container is approximately **~150MB** compressed and starts in **~5 seconds**.
+---
+
+## 🔧 Client-LLM Test Script
+
+Use this script to verify that the client performs LLM work and the backend accepts results.
+
+Create `scripts/test_client_llm.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+BASE_URL="${BASE_URL:-http://localhost:8000}"
+PROFILE="${PROFILE:-Ravindra}"
+
+# 1) Health
+curl -s "$BASE_URL/health" | jq .
+
+# 2) Get supervisor prompt (server computes context; client does LLM)
+SUP=$(curl -s "$BASE_URL/api/prompts/supervisor?profile_id=$PROFILE")
+echo "$SUP" | jq . > /dev/null
+PROMPT=$(echo "$SUP" | jq -r '.prompt')
+
+# 3) Simulate client LLM bullets (you would call Gemini client-side here)
+# For demo, just fake three bullets
+BULLETS='["Protect 60m deep work 09:00-10:00","Batch emails at 12:30 and 17:30","Prep unwind by 21:30"]'
+
+# 4) Call backend with client bullets
+curl -s -X POST "$BASE_URL/api/plan/day" \
+  -H 'Content-Type: application/json' \
+  -d "{\"profile_id\":\"$PROFILE\",\"supervisor_insights_bullets\":$BULLETS}" | jq '.cards[0], .rationale'
+
+# 5) Natural language via client_action (skip server LLM)
+curl -s -X POST "$BASE_URL/api/nl" \
+  -H 'Content-Type: application/json' \
+  -d "{\"profile_id\":\"$PROFILE\",\"target\":\"birthday\",\"client_action\":{\"type\":\"change_venue\",\"venue\":\"The Blue Door\"}}" | jq .
+
+echo "Done. Client provided LLM outputs; backend did not call Gemini."
+```
+
+Then:
+```bash
+chmod +x scripts/test_client_llm.sh
+./scripts/test_client_llm.sh
+```
+
+If you want a WebSocket test, I can add a Node or Python snippet as well.

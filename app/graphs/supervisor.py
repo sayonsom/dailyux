@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime
 from app.schemas import AgentCard
 from app.agents import getting_started, traffic, work_life, fitness, hobby, life_after_work, relaxation
@@ -222,14 +222,12 @@ def node_celebrations(state: PlannerState):
         state["outputs"]["cards"].append(card.dict())
     return state
 
-# Supervisor insights card
+# ---------------- Prompt helpers ----------------
 
-def supervisor_insights(profile: Dict[str, Any], ctx: Dict[str, Any]) -> AgentCard:
+def make_supervisor_bullets_prompt(profile: Dict[str, Any], ctx: Dict[str, Any]) -> str:
     role = (ctx.get("role") or "").title(); load = ctx.get("day_load", "medium")
     fw = ctx.get("focus_windows") or []
     fw_str = ", ".join([w["window"] for w in fw]) if fw else ""
-    summary = f"Load {load}; {ctx.get('event_count',0)} events" + (f"; focus {fw_str}" if fw_str else "")
-
     prompt = (
         "You are a pragmatic day planner. Given user role, day load, "
         "free blocks and first/last events, produce 3 crisp planning tips. "
@@ -238,11 +236,22 @@ def supervisor_insights(profile: Dict[str, Any], ctx: Dict[str, Any]) -> AgentCa
         f"\nLast: {ctx.get('last_event_time')} {ctx.get('last_event_title')}"
         f"\nFocus windows: {fw_str}\nNight owl: {bool(ctx.get('night_owl'))}\n"
     )
-    bullets = generate_bullets(prompt, count=3) or [
+    return prompt
+
+# Supervisor insights card
+
+def supervisor_insights(profile: Dict[str, Any], ctx: Dict[str, Any], *, bullets_override: Optional[List[str]] = None) -> AgentCard:
+    role = (ctx.get("role") or "").title(); load = ctx.get("day_load", "medium")
+    fw = ctx.get("focus_windows") or []
+    fw_str = ", ".join([w["window"] for w in fw]) if fw else ""
+    summary = f"Load {load}; {ctx.get('event_count',0)} events" + (f"; focus {fw_str}" if fw_str else "")
+
+    prompt = make_supervisor_bullets_prompt(profile, ctx)
+    bullets = bullets_override if bullets_override is not None else (generate_bullets(prompt, count=3) or [
         (f"Protect 60m deep work {fw[0]['window']}" if fw else "Protect one 60m deep-work block"),
         "Batch emails twice; avoid constant context switching",
         ("Prep for evening unwind by 21:30" if not bool(ctx.get('night_owl')) else "Aim lights out by 23:30"),
-    ]
+    ])
     return AgentCard(agent="SupervisorAgent", title="Planner Insights", summary=summary, priority=0, data={"insights": bullets, "focus_windows": fw, "load": load, "role": role})
 
 # Fallback linear variants so all edges exist

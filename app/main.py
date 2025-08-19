@@ -1,21 +1,98 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
-from datetime import datetime
+from datetime import datetime, timedelta, date as _date
 import json, asyncio
 from app.schemas import PlanRequest, PlanResponse, AgentRunRequest, BirthdayPlanRequest, UpsertProfileRequest
 from app.schemas import AgentCard
 from app.profiles.demo import DEMO_PROFILES
-from app.graphs.supervisor import SUPERVISOR_GRAPH, NODE_FUN, LINEAR_A, LINEAR_B, compute_day_context, router_order, supervisor_insights
+from app.graphs.supervisor import SUPERVISOR_GRAPH, NODE_FUN, LINEAR_A, LINEAR_B, compute_day_context, router_order, supervisor_insights, make_supervisor_bullets_prompt
 from app.graphs.birthday import BIRTHDAY_GRAPH
-from typing import Dict, Any, Optional
-from app.schemas import NaturalCommandRequest, NaturalCommandResponse
-from app.llm.llm import interpret_nl
-from app.tools.comms import rewrite_invite_template, compose_message, render_invite_preview
+from typing import Dict, Any, Optional, List
+from app.schemas import NaturalCommandRequest, NaturalCommandResponse, BuildPromptRequest, BuildPromptResponse
+from app.llm.llm import interpret_nl, build_interpret_nl_prompt, build_bullets_prompt
+from app.tools.comms import rewrite_invite_template, compose_message, render_invite_preview, build_rewrite_invite_prompt
+from app.settings import settings
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Agentic Day Planner (LangGraph + Gemini)")
 
+# Permissive CORS (dev): allow all origins, methods, and headers
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
+
 # ---------------- Simple in-memory persistence ----------------
 PLAN_STORE: Dict[str, Dict[str, Any]] = {}
+
+# Helper: derive spouse name from profile metadata
+_def_spouse_tokens = {"spouse", "wife", "husband", "partner"}
+
+def _derive_spouse_name(profile: Dict[str, Any]) -> Optional[str]:
+    try:
+        fam = (profile or {}).get("meta", {}).get("family", [])
+        for m in fam:
+            rel = (m.get("relation") or "").strip().lower()
+            if rel in _def_spouse_tokens:
+                return m.get("name")
+    except Exception:
+        pass
+    return None
+
+# Parse MM-DD or YYYY-MM-DD into a date in the next `horizon_days` days, else None
+
+def _parse_upcoming(date_str: str, today: _date, horizon_days: int = 60) -> Optional[_date]:
+    try:
+        if len(date_str) == 10:
+            dt = datetime.fromisoformat(date_str).date()
+        else:
+            dt = datetime.fromisoformat(f"{today.year}-{date_str}").date()
+        # If already passed this year, consider next year
+        if dt < today:
+            try:
+                dt = datetime.fromisoformat(f"{today.year + 1}-{date_str}").date()
+            except Exception:
+                pass
+        if 0 <= (dt - today).days <= horizon_days:
+            return dt
+    except Exception:
+        return None
+    return None
+
+
+def _pick_upcoming_birthday(profile: Dict[str, Any], horizon_days: int = 60) -> Optional[Dict[str, Any]]:
+    today = datetime.now().date()
+    best: Optional[Dict[str, Any]] = None
+    best_days = 10**9
+    meta = (profile or {}).get("meta", {})
+    # family
+    for f in meta.get("family", []) or []:
+        b = f.get("birthday")
+        if not b:
+            continue
+        dt = _parse_upcoming(b, today, horizon_days)
+        if not dt:
+            continue
+        days = (dt - today).days
+        if days < best_days:
+            best_days = days
+            best = {"name": f.get("name"), "relation": f.get("relation", "family"), "date": dt.isoformat(), "type": "birthday"}
+    # colleagues
+    for c in meta.get("colleagues", []) or []:
+        b = c.get("birthday")
+        if not b:
+            continue
+        dt = _parse_upcoming(b, today, horizon_days)
+        if not dt:
+            continue
+        days = (dt - today).days
+        if days < best_days:
+            best_days = days
+            best = {"name": c.get("name"), "relation": c.get("role", "colleague"), "date": dt.isoformat(), "type": "birthday"}
+    return best
 
 def _get_persisted_plan(thread_id: str) -> Optional[Dict[str, Any]]:
     plan = PLAN_STORE.get(thread_id)
@@ -66,7 +143,7 @@ def plan_day(req: PlanRequest):
     # Execute in-process in decided order (explicit execution for better streaming parity)
     state = init
     # Supervisor insights first
-    sup = supervisor_insights(profile, ctx)
+    sup = supervisor_insights(profile, ctx, bullets_override=req.supervisor_insights_bullets)
     state.setdefault("outputs", {}).setdefault("cards", []).append(sup.dict())
     for node_name in order:
         state = NODE_FUN[node_name](state)
@@ -96,7 +173,22 @@ def run_agent(req: AgentRunRequest):
 def birthday_task(req: BirthdayPlanRequest):
     profile = DEMO_PROFILES.get(req.profile_id)
     if not profile: raise HTTPException(404, f"Unknown profile_id {req.profile_id}")
-    state = {"messages": [], "profile": profile, "params": req.dict(), "plan": {}}
+    # Sensible defaults
+    spouse = req.spouse_name or ""
+    if spouse in {"Spouse", "Wife", "Husband", "Partner", ""}:
+        spouse = _derive_spouse_name(profile) or spouse or "Spouse"
+    params = req.dict(); params["spouse_name"] = spouse
+
+    # If no explicit event_date, try to pick the nearest upcoming birthday from profile context
+    if not params.get("event_date"):
+        cand = _pick_upcoming_birthday(profile)
+        if cand:
+            params["spouse_name"] = cand.get("name") or params.get("spouse_name")
+            params["event_date"] = cand.get("date")
+            params["relation"] = cand.get("relation", "family")
+            params["event_type"] = cand.get("type", "birthday")
+
+    state = {"messages": [], "profile": profile, "params": params, "plan": {}}
     # Provide required configurable keys for checkpointer
     thread_id = f"{req.profile_id}:birthday:{int(datetime.now().timestamp())}"
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "birthday"}}
@@ -112,7 +204,7 @@ def nl_command(req: NaturalCommandRequest):
     profile = DEMO_PROFILES.get(req.profile_id)
     if not profile: raise HTTPException(404, f"Unknown profile_id {req.profile_id}")
 
-    action = interpret_nl(req.utterance)
+    action = req.client_action or interpret_nl(req.utterance)
     target = req.target
     thread_id = req.thread_id or f"{req.profile_id}:nl:{int(datetime.now().timestamp())}"
 
@@ -131,13 +223,17 @@ def nl_command(req: NaturalCommandRequest):
 
         # If starting or no plan exists, run graph to initialize
         if action.get("type") == "start_birthday_plan" or not plan:
+            cand = _pick_upcoming_birthday(profile)
             params = {
                 "profile_id": req.profile_id,
-                "spouse_name": action.get("spouse_name", "Spouse"),
-                "event_date": action.get("event_date"),
+                "spouse_name": action.get("spouse_name") or (cand.get("name") if cand else None) or _derive_spouse_name(profile) or "Spouse",
+                "event_date": action.get("event_date") or (cand.get("date") if cand else None),
                 "budget": action.get("budget", 10000),
                 "invitees": action.get("invitees", []),
             }
+            if cand:
+                params["relation"] = cand.get("relation", "family")
+                params["event_type"] = cand.get("type", "birthday")
             state = {"messages": [], "profile": profile, "params": params, "plan": plan}
             config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "birthday"}}
             result = BIRTHDAY_GRAPH.invoke(state, config=config)
@@ -268,7 +364,7 @@ async def ws_plan_day(ws: WebSocket):
 
         state = {"messages": [], "profile": profile, "request": {"date": date, "context": ctx}, "now": datetime.now().isoformat(), "outputs": {}, "logs": []}
         # supervisor first
-        sup = supervisor_insights(profile, ctx)
+        sup = supervisor_insights(profile, ctx, bullets_override=payload.get("supervisor_insights_bullets"))
         state.setdefault("outputs", {}).setdefault("cards", []).append(sup.dict())
         await ws.send_json({"type": "card", "node": "supervisor", "cards": [sup.dict()]})
 
@@ -290,3 +386,31 @@ async def ws_plan_day(ws: WebSocket):
             pass
         finally:
             await ws.close()
+
+@app.post("/api/prompts/build", response_model=BuildPromptResponse)
+def build_prompt(req: BuildPromptRequest):
+    if req.kind == "supervisor_bullets":
+        # req.prompt must already include the day-context prompt (client can also reconstruct)
+        if not req.prompt:
+            raise HTTPException(400, "prompt is required for supervisor_bullets")
+        return BuildPromptResponse(prompt=build_bullets_prompt(req.prompt, count=3))
+    elif req.kind == "interpret_nl":
+        if not req.utterance:
+            raise HTTPException(400, "utterance is required for interpret_nl")
+        return BuildPromptResponse(prompt=build_interpret_nl_prompt(req.utterance))
+    elif req.kind == "rewrite_invite":
+        if not (req.style and req.brevity and req.current_template):
+            raise HTTPException(400, "style, brevity, and current_template are required for rewrite_invite")
+        return BuildPromptResponse(prompt=build_rewrite_invite_prompt(req.style, req.brevity, req.current_template))
+    else:
+        raise HTTPException(400, f"Unknown kind {req.kind}")
+
+@app.get("/api/prompts/supervisor")
+def get_supervisor_prompt(profile_id: str, date: Optional[str] = None):
+    profile = DEMO_PROFILES.get(profile_id)
+    if not profile:
+        raise HTTPException(404, f"Unknown profile_id {profile_id}")
+    date = date or datetime.now().date().isoformat()
+    ctx = compute_day_context(profile, date)
+    prompt = make_supervisor_bullets_prompt(profile, ctx)
+    return {"prompt": build_bullets_prompt(prompt, count=3), "context": ctx}

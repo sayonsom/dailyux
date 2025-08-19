@@ -15,7 +15,9 @@ def _import_llm():
 
 
 def get_llm():
-    """Return a cached LLM client or None if unavailable."""
+    """Return a cached LLM client or None if unavailable or disabled by config."""
+    if (settings.LLM_MODE or "client").lower() != "server":
+        return None
     global _llm
     if _llm is None:
         ChatGoogleGenerativeAI = _import_llm()
@@ -38,39 +40,75 @@ def _safe_text(resp) -> str:
         return ""
 
 
+# ---------------- Client-first prompts and parsers ----------------
+
+def build_bullets_prompt(prompt: str, count: int = 3) -> str:
+    """Return a model-agnostic prompt for generating short numbered bullets."""
+    return (
+        prompt
+        + f"\n\nRespond with {count} short, numbered bullets. Keep each under 12 words."
+    )
+
+
+def parse_bullets(text: str, count: int = 3) -> List[str]:
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    cleaned: List[str] = []
+    for l in lines:
+        l2 = l.lstrip("-• ")
+        # remove leading numbers like "1.", "1)"
+        if len(l2) > 2 and l2[0].isdigit() and l2[1] in ".)":
+            l2 = l2[2:].strip()
+        cleaned.append(l2)
+    out: List[str] = []
+    for c in cleaned:
+        if c and c not in out:
+            out.append(c)
+    return out[:count]
+
+
 def generate_bullets(prompt: str, count: int = 3) -> List[str]:
-    """Return up to `count` concise bullets from the LLM. Falls back to empty list on error."""
+    """Return up to `count` concise bullets from the LLM.
+    If server LLMs are disabled, return an empty list so callers can provide client results.
+    """
     try:
         llm = get_llm()
         if llm is None:
             return []
-        full_prompt = (
-            prompt
-            + f"\n\nRespond with {count} short, numbered bullets. Keep each under 12 words."
-        )
+        full_prompt = build_bullets_prompt(prompt, count=count)
         resp = llm.invoke(full_prompt)
         text = _safe_text(resp)
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        cleaned: List[str] = []
-        for l in lines:
-            l2 = l.lstrip("-• ")
-            # remove leading numbers like "1.", "1)"
-            if len(l2) > 2 and l2[0].isdigit() and l2[1] in ".)":
-                l2 = l2[2:].strip()
-            cleaned.append(l2)
-        out: List[str] = []
-        for c in cleaned:
-            if c and c not in out:
-                out.append(c)
-        return out[:count]
+        return parse_bullets(text, count=count)
     except Exception:
         return []
 
 # ---------------- NL Interpreter ----------------
 
+NL_SCHEMA = (
+    "Decide the intent of this instruction for a day-planner/birthday-planner app. "
+    "Return JSON only. Keys: type: one of [start_birthday_plan, edit_invite_tone, edit_invite_text, change_date, change_venue, adjust_budget, add_invitees, remove_invitees, unknown]. "
+    "Optional keys by type: spouse_name, event_date(YYYY-MM-DD), budget(int), venue(string), style(one of playful,formal,romantic,friendly,professional), brevity(one of short,medium,detailed), template(string), emails(array)."
+)
+
+
+def build_interpret_nl_prompt(utterance: str) -> str:
+    return f"{NL_SCHEMA}\n\nInstruction: {utterance}\n\nJSON:"
+
+
+def parse_interpret_nl(text: str, utterance: str) -> Dict[str, Any]:
+    try:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+    except Exception:
+        pass
+    return {"type": "unknown", "utterance": utterance}
+
+
 def interpret_nl(utterance: str) -> Dict[str, Any]:
     """Map a natural instruction to a structured action dict with fields:
     {"type": <intent>, ...}. No chain-of-thought is produced or logged.
+    If server LLM is disabled, uses rules and returns unknown when ambiguous.
     """
     utter = utterance.strip()
     low = utter.lower()
@@ -112,7 +150,7 @@ def interpret_nl(utterance: str) -> Dict[str, Any]:
             return {"type": "change_date", "event_date": m.group(1)}
 
     if "venue" in low or "place" in low:
-        m = re.search(r"(at|to)\s+([A-Za-z0-9 &'-]+)$", utter)
+        m = re.search(r"(at|to)\s+([A-Za-z0-9 &'\-]+)$", utter)
         if m:
             return {"type": "change_venue", "venue": m.group(2).strip()}
 
@@ -131,19 +169,10 @@ def interpret_nl(utterance: str) -> Dict[str, Any]:
     if llm is None:
         return {"type": "unknown", "utterance": utter}
 
-    schema = (
-        "Decide the intent of this instruction for a day-planner/birthday-planner app. "
-        "Return JSON only. Keys: type: one of [start_birthday_plan, edit_invite_tone, edit_invite_text, change_date, change_venue, adjust_budget, add_invitees, remove_invitees, unknown]. "
-        "Optional keys by type: spouse_name, event_date(YYYY-MM-DD), budget(int), venue(string), style(one of playful,formal,romantic,friendly,professional), brevity(one of short,medium,detailed), template(string), emails(array)."
-    )
-    prompt = f"{schema}\n\nInstruction: {utter}\n\nJSON:"
+    prompt = build_interpret_nl_prompt(utter)
     try:
         resp = llm.invoke(prompt)
         txt = _safe_text(resp)
-        start = txt.find("{")
-        end = txt.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(txt[start:end+1])
+        return parse_interpret_nl(txt, utter)
     except Exception:
-        pass
-    return {"type": "unknown", "utterance": utter}
+        return {"type": "unknown", "utterance": utter}

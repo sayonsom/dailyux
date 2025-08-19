@@ -17,6 +17,10 @@ class PlanResponse(BaseModel):
 
 class PlanRequest(BaseModel):
     profile_id: str
+
+    # Optional client-supplied LLM results to use in place of server calls
+    supervisor_insights_bullets: Optional[List[str]] = None
+
     date: Optional[str] = None
 
 class AgentRunRequest(BaseModel):
@@ -53,9 +57,26 @@ class NaturalCommandRequest(BaseModel):
     plan: Optional[Dict[str, Any]] = None
     agent: Optional[str] = None  # when target==agent
 
+    # Client-side NL interpretation result to avoid server LLM
+    client_action: Optional[Dict[str, Any]] = None
+
 class NaturalCommandResponse(BaseModel):
     ok: bool
     summary: str
     plan: Optional[Dict[str, Any]] = None
     cards: Optional[List[AgentCard]] = None
     thread_id: Optional[str] = None
+
+# ---------------- Client-LLM Prompt APIs ----------------
+
+class BuildPromptRequest(BaseModel):
+    kind: Literal["supervisor_bullets", "interpret_nl", "rewrite_invite"]
+    # Generic input fields
+    prompt: Optional[str] = None
+    utterance: Optional[str] = None
+    style: Optional[Tone] = None
+    brevity: Optional[Brevity] = None
+    current_template: Optional[str] = None
+
+class BuildPromptResponse(BaseModel):
+    prompt: str

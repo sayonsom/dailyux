@@ -7,6 +7,9 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+# Default to client-side LLM execution; can be overridden at runtime
+ENV LLM_MODE=client
+ENV GEMINI_MODEL=gemini-2.5-pro
 
 # Install system dependencies
 RUN apt-get update \

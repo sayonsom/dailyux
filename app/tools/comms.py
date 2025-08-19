@@ -31,12 +31,24 @@ def render_invite_preview(template: str, invitees: List[str], params: Dict[str, 
         local.setdefault("name", sample)
     return compose_message(template, local)[:180]
 
+# ---------------- Client LLM helpers ----------------
+
+def build_rewrite_invite_prompt(style: str, brevity: str, current_template: str) -> str:
+    system = (
+        "You revise an event invite template. Keep placeholders EXACTLY unchanged: "
+        "{name}, {guest}, {spouse}, {date}, {venue}, {rsvp}. Apply the requested tone and brevity. "
+        "Return ONLY the revised template text, no code fences, no commentary."
+    )
+    return f"{system}\n\nTONE: {style}\nBREVITY: {brevity}\n\nCurrent Template:\n{current_template}\n\nRevised Template:"
+
+
 def _safe_content(resp: Any) -> str:
     try:
         text = getattr(resp, "content", None)
         return text if isinstance(text, str) else (str(resp) if resp is not None else "")
     except Exception:
         return ""
+
 
 def rewrite_invite_template(style: str, brevity: str, current_template: str, constraints: Dict[str, str]) -> str:
     """Rewrite invite template with tone/brevity; preserve placeholders like {name},{guest},{spouse},{date},{venue},{rsvp}."""
@@ -62,14 +74,7 @@ def rewrite_invite_template(style: str, brevity: str, current_template: str, con
             t = t
         return t
 
-    system = (
-        "You revise an event invite template. Keep placeholders EXACTLY unchanged: "
-        "{name}, {guest}, {spouse}, {date}, {venue}, {rsvp}. Apply the requested tone and brevity. "
-        "Return ONLY the revised template text, no code fences, no commentary."
-    )
-    prompt = (
-        f"{system}\n\nTONE: {style}\nBREVITY: {brevity}\n\nCurrent Template:\n{current_template}\n\nRevised Template:"
-    )
+    prompt = build_rewrite_invite_prompt(style, brevity, current_template)
     # Note: Avoid system role; model uses human messages
     resp = llm.invoke(prompt)
     text = _safe_content(resp).strip()

@@ -104,7 +104,7 @@ deploy_gcp() {
         --platform managed \
         --region us-central1 \
         --allow-unauthenticated \
-        --set-env-vars "GEMINI_MODEL=gemini-1.5-pro,TZ=Asia/Kolkata" \
+        --set-env-vars "GEMINI_MODEL=gemini-2.5-pro,TZ=Asia/Kolkata" \
         --memory 512Mi \
         --cpu 1 \
         --max-instances 10

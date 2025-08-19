@@ -11,21 +11,44 @@ def node_calendar(state: BirthdayState):
     params = state.get("params", {})
     date = params.get("event_date") or (datetime.now().date() + timedelta(days=14)).isoformat()
     cal = calendar_lookup(state.get("profile", {}), date)
-    plan = dict(state.get("plan", {})); plan["date"] = date; plan["availability"] = (cal.get("events", [])[:2])
+    plan = dict(state.get("plan", {}))
+    plan["date"] = date
+    plan["availability"] = (cal.get("events", [])[:2])
+    # Propagate honoree context if provided
+    if params.get("relation"):
+        plan["relation"] = params.get("relation")
+    if params.get("event_type"):
+        plan["event_type"] = params.get("event_type")
+    if params.get("spouse_name"):
+        plan["honoree_name"] = params.get("spouse_name")
     new_state = dict(state); new_state["plan"] = plan
     return new_state
 
 def node_plan_event(state: BirthdayState):
     p = state.get("params", {})
-    spouse = p.get("spouse_name", "Spouse"); budget = p.get("budget", 10000)
+    spouse = p.get("spouse_name", state.get("plan", {}).get("honoree_name") or "Spouse")
+    budget = p.get("budget", 10000)
+    relation = state.get("plan", {}).get("relation") or p.get("relation") or "family"
+    event_type = state.get("plan", {}).get("event_type") or p.get("event_type") or "birthday"
     venue = "Quiet rooftop" if (state.get("profile", {}).get("meta", {}).get("stressors")) else "Trendy lounge"
-    plan = dict(state.get("plan", {})); plan.update({"spouse_name": spouse, "venue": venue, "theme": "Warm & Minimal", "budget": budget, "timeline": ["18:30 arrivals","19:15 toast","20:00 dinner","21:00 cake"]})
+    plan = dict(state.get("plan", {}))
+    plan.update({
+        "spouse_name": spouse,
+        "honoree_name": plan.get("honoree_name") or spouse,
+        "relation": relation,
+        "event_type": event_type,
+        "venue": venue,
+        "theme": "Warm & Minimal",
+        "budget": budget,
+        "timeline": ["18:30 arrivals","19:15 toast","20:00 dinner","21:00 cake"],
+    })
     new_state = dict(state); new_state["plan"] = plan
     return new_state
 
 def node_compose_invites(state: BirthdayState):
     p = state.get("params", {}); invitees = p.get("invitees", [])
-    msg = compose_message("Hi {name},\nYou're invited to {spouse}'s surprise on {date} at {venue}. RSVP: {rsvp}", {"name": "{guest}", "spouse": p.get("spouse_name", state.get("plan", {}).get("spouse_name","Spouse")), "date": state.get("plan", {}).get("date"), "venue": state.get("plan", {}).get("venue","Venue"), "rsvp": "https://example.com/rsvp"})
+    honoree = state.get("plan", {}).get("honoree_name") or p.get("spouse_name", "Spouse")
+    msg = compose_message("Hi {name},\nYou're invited to {spouse}'s surprise on {date} at {venue}. RSVP: {rsvp}", {"name": "{guest}", "spouse": honoree, "date": state.get("plan", {}).get("date"), "venue": state.get("plan", {}).get("venue","Venue"), "rsvp": "https://example.com/rsvp"})
     preview = msg.replace("{guest}", invitees[0] if invitees else "Guest")
     plan = dict(state.get("plan", {})); plan.update({"invite_message_template": msg, "invite_preview": preview, "invitees": invitees})
     new_state = dict(state); new_state["plan"] = plan

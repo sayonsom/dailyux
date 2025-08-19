@@ -66,7 +66,7 @@ DEMO_PROFILES = {
                 {"name": "Rahul", "relation": "brother", "birthday": "09-01", "likes": ["F1", "PS5"]},
             ],
             "colleagues": [
-                {"name": "Jia", "role": "Engineer", "birthday": "11-11", "likes": ["bubble tea"], "notes": "night owl"},
+                {"name": "Jia", "role": "Engineer", "birthday": "08-25", "likes": ["bubble tea"], "notes": "night owl"},
             ],
         },
         "timezone": "Asia/Kolkata",

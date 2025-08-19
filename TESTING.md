@@ -6,7 +6,7 @@ This guide shows how to test the agentic workflows using the built-in Swagger UI
 
 Prereqs
 - Python 3.10+
-- Env vars: GOOGLE_API_KEY, optional GEMINI_MODEL (default: gemini-1.5-pro), TZ (default: Asia/Kolkata)
+- Env vars: GOOGLE_API_KEY, optional GEMINI_MODEL (default: gemini-2.5-pro), TZ (default: Asia/Kolkata)
 
 Run locally
 ```bash
