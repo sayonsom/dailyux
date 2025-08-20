@@ -7,8 +7,8 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-# Default to client-side LLM execution; can be overridden at runtime
-ENV LLM_MODE=client
+# Default to server-side LLM execution; can be overridden at runtime
+ENV LLM_MODE=server
 ENV GEMINI_MODEL=gemini-2.5-pro
 
 # Install system dependencies
@@ -28,6 +28,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Copy application code
 COPY app/ ./app/
+COPY static/ ./static/
 
 # Create non-root user for security
 RUN adduser --disabled-password --gecos '' --uid 1000 appuser \

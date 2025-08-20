@@ -10,7 +10,7 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-pro}
       - TZ=${TZ:-Asia/Kolkata}
-      - LLM_MODE=${LLM_MODE:-client}
+      - LLM_MODE=${LLM_MODE:-server}
     env_file:
       - .env
     volumes:

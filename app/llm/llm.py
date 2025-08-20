@@ -57,122 +57,65 @@ def parse_bullets(text: str, count: int = 3) -> List[str]:
         l2 = l.lstrip("-• ")
         # remove leading numbers like "1.", "1)"
         if len(l2) > 2 and l2[0].isdigit() and l2[1] in ".)":
-            l2 = l2[2:].strip()
+            # strip leading number and punctuation
+            i = 1
+            while i < len(l2) and l2[i] in ")}. ":
+                i += 1
+            l2 = l2[i:]
         cleaned.append(l2)
     out: List[str] = []
     for c in cleaned:
-        if c and c not in out:
+        if c:
             out.append(c)
     return out[:count]
 
 
 def generate_bullets(prompt: str, count: int = 3) -> List[str]:
-    """Return up to `count` concise bullets from the LLM.
-    If server LLMs are disabled, return an empty list so callers can provide client results.
-    """
+    llm = get_llm()
+    if not llm:
+        # Fallback deterministic placeholders
+        return [
+            "Protect 60m deep work",
+            "Batch messages mid-day",
+            "Plan unwind window",
+        ][:count]
     try:
-        llm = get_llm()
-        if llm is None:
-            return []
-        full_prompt = build_bullets_prompt(prompt, count=count)
+        full_prompt = build_bullets_prompt(prompt, count)
         resp = llm.invoke(full_prompt)
         text = _safe_text(resp)
-        return parse_bullets(text, count=count)
+        bullets = parse_bullets(text, count)
+        return bullets if bullets else ["Short plan point 1", "Short plan point 2", "Short plan point 3"][:count]
     except Exception:
-        return []
-
-# ---------------- NL Interpreter ----------------
-
-NL_SCHEMA = (
-    "Decide the intent of this instruction for a day-planner/birthday-planner app. "
-    "Return JSON only. Keys: type: one of [start_birthday_plan, edit_invite_tone, edit_invite_text, change_date, change_venue, adjust_budget, add_invitees, remove_invitees, unknown]. "
-    "Optional keys by type: spouse_name, event_date(YYYY-MM-DD), budget(int), venue(string), style(one of playful,formal,romantic,friendly,professional), brevity(one of short,medium,detailed), template(string), emails(array)."
-)
+        return [
+            "Protect 60m deep work",
+            "Batch messages mid-day",
+            "Plan unwind window",
+        ][:count]
 
 
-def build_interpret_nl_prompt(utterance: str) -> str:
-    return f"{NL_SCHEMA}\n\nInstruction: {utterance}\n\nJSON:"
+# NL interpretation helpers (simple)
+
+def build_interpret_nl_prompt(kind: str, params: Dict[str, Any]) -> str:
+    if kind == "interpret_nl":
+        utt = params.get("utterance", "")
+        return (
+            "You are a planner assistant. Interpret the user's utterance into a JSON action.\n"
+            "Possible actions: change_theme, change_tone, add_invitees, remove_invitees, change_time, change_venue.\n"
+            "Return strictly a JSON object with keys: type (string), and relevant fields.\n"
+            f"Utterance: {utt}\n"
+        )
+    return ""
 
 
-def parse_interpret_nl(text: str, utterance: str) -> Dict[str, Any]:
-    try:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(text[start : end + 1])
-    except Exception:
-        pass
-    return {"type": "unknown", "utterance": utterance}
-
-
-def interpret_nl(utterance: str) -> Dict[str, Any]:
-    """Map a natural instruction to a structured action dict with fields:
-    {"type": <intent>, ...}. No chain-of-thought is produced or logged.
-    If server LLM is disabled, uses rules and returns unknown when ambiguous.
-    """
-    utter = utterance.strip()
-    low = utter.lower()
-
-    # Quick rules for common intents
-    if any(k in low for k in ["start", "plan", "birthday"]):
-        action: Dict[str, Any] = {"type": "start_birthday_plan"}
-        m = re.search(r"for\s+([A-Za-z ]+)", utter)
-        if m:
-            name = m.group(1).strip().strip('.')
-            action["spouse_name"] = name
-        m = re.search(r"budget\s+(\d+[kK]?)", low)
-        if m:
-            val = m.group(1)
-            action["budget"] = int(val[:-1]) * 1000 if val.lower().endswith('k') else int(val)
-        return action
-
-    if any(k in low for k in ["tone", "playful", "formal", "romantic", "friendly", "professional"]):
-        m_style = re.search(r"(playful|formal|romantic|friendly|professional)", low)
-        style = m_style.group(1) if m_style else "friendly"
-        m_brev = re.search(r"(short|brief|detailed|long|medium)", low)
-        x = m_brev.group(1) if m_brev else "medium"
-        brev = "short" if x in ("short", "brief") else ("detailed" if x in ("detailed", "long") else "medium")
-        return {"type": "edit_invite_tone", "style": style, "brevity": brev, "notes": utter}
-
-    if any(k in low for k in ["template", "rewrite", "edit invite", "change invite", "reword"]):
-        return {"type": "edit_invite_text", "template": utter}
-
-    if "budget" in low:
-        m = re.search(r"(\d+[kK]?)", low)
-        if m:
-            val = m.group(1)
-            amount = int(val[:-1]) * 1000 if val.lower().endswith('k') else int(val)
-            return {"type": "adjust_budget", "budget": amount}
-
-    if "date" in low:
-        m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", low)
-        if m:
-            return {"type": "change_date", "event_date": m.group(1)}
-
-    if "venue" in low or "place" in low:
-        m = re.search(r"(at|to)\s+([A-Za-z0-9 &'\-]+)$", utter)
-        if m:
-            return {"type": "change_venue", "venue": m.group(2).strip()}
-
-    if "add" in low and "invite" in low:
-        emails = re.findall(r"[\w.]+@[\w.-]+", utter)
-        if emails:
-            return {"type": "add_invitees", "emails": emails}
-
-    if "remove" in low and "invite" in low:
-        emails = re.findall(r"[\w.]+@[\w.-]+", utter)
-        if emails:
-            return {"type": "remove_invitees", "emails": emails}
-
-    # LLM fallback for richer parsing
+def interpret_nl(utterance: str) -> Optional[Dict[str, Any]]:
     llm = get_llm()
-    if llm is None:
-        return {"type": "unknown", "utterance": utter}
-
-    prompt = build_interpret_nl_prompt(utter)
+    if not llm:
+        return None
     try:
+        prompt = build_interpret_nl_prompt("interpret_nl", {"utterance": utterance})
         resp = llm.invoke(prompt)
-        txt = _safe_text(resp)
-        return parse_interpret_nl(txt, utter)
+        text = _safe_text(resp)
+        import json
+        return json.loads(text)
     except Exception:
-        return {"type": "unknown", "utterance": utter}
+        return None

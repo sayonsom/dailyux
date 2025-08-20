@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Birthday Planner - Quick Test</title>
+  <style>
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; margin: 0; background: #0b1220; color: #e6edf3; }
+    header { padding: 16px 20px; background: #111826; border-bottom: 1px solid #1f2a3a; }
+    main { padding: 16px 20px; display: grid; grid-template-columns: 340px 1fr; gap: 16px; }
+    h2 { margin: 16px 0 8px; font-size: 16px; color: #c9d1d9; }
+    .card { background: #0f172a; border: 1px solid #1f2a3a; border-radius: 10px; padding: 12px; }
+    label { display:block; font-size: 12px; opacity: 0.9; margin: 8px 0 4px; }
+    input, select, textarea { width: 100%; background: #0b1220; color: #e6edf3; border: 1px solid #263244; border-radius: 8px; padding: 8px; }
+    textarea { min-height: 80px; }
+    button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+    button.secondary { background: #334155; }
+    button.ghost { background: transparent; border: 1px solid #334155; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .row { display:flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .muted { color: #9aa7b1; font-size: 12px; }
+    .badge { display:inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #1f2a3a; color:#9fb5ff; border: 1px solid #263b80; }
+    code, pre { background:#0b1220; border:1px solid #1f2a3a; border-radius:8px; padding:8px; color:#cbd5e1; overflow:auto; }
+    ul.inline { list-style: none; padding-left: 0; margin: 0; display:flex; gap:6px; flex-wrap: wrap; }
+    ul.inline li { background:#0b1220; border:1px solid #1f2a3a; border-radius: 999px; padding: 4px 8px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <div style="font-weight:600">Agentic Birthday Planner – Test Client</div>
+      <div class="muted">Backend must run at http://localhost:8000</div>
+    </div>
+  </header>
+  <main>
+    <section class="card" id="controls">
+      <h2>Start plan</h2>
+      <label>Profile</label>
+      <select id="profileId"></select>
+      <div class="row">
+        <div style="flex:1">
+          <label>Honoree (spouse/friend name)</label>
+          <input id="spouseName" placeholder="optional; auto-detects from profile" />
+        </div>
+      </div>
+      <div class="row">
+        <div style="flex:1">
+          <label>Event date (YYYY-MM-DD)</label>
+          <input id="eventDate" placeholder="optional; will auto-pick upcoming" />
+        </div>
+        <div style="width:140px">
+          <label>Budget</label>
+          <input id="budget" type="number" value="10000" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="startBtn">Start Birthday Plan</button>
+        <button class="secondary" id="reloadBtn" disabled>Reload Plan</button>
+      </div>
+      <div class="muted" style="margin-top:8px">Thread: <span id="thread"></span></div>
+
+      <h2 style="margin-top:18px">Actions</h2>
+      <div class="row">
+        <select id="themePick"></select>
+        <button id="changeThemeBtn" class="ghost" disabled>Change Theme</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select id="venuePick"></select>
+        <button id="changeVenueBtn" class="ghost" disabled>Change Venue</button>
+        <button id="confirmThemeVenueBtn" disabled>Confirm Theme & Venue</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select id="timePick"></select>
+        <button id="chooseTimeBtn" class="ghost" disabled>Choose Time</button>
+        <input id="changeDate" placeholder="YYYY-MM-DD" style="width:160px" />
+        <button id="changeDateBtn" class="ghost" disabled>Change Date</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="inviteEmails" placeholder="name@email.com, other@domain.com" />
+        <button id="addInviteesBtn" class="ghost" disabled>Add Invitees</button>
+        <button id="removeInviteesBtn" class="ghost" disabled>Remove Invitees</button>
+        <button id="confirmInviteesBtn" disabled>Confirm Invitees</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select id="toneStyle">
+          <option value="friendly">friendly</option>
+          <option value="formal">formal</option>
+          <option value="playful">playful</option>
+          <option value="professional">professional</option>
+          <option value="romantic">romantic</option>
+        </select>
+        <select id="toneBrevity">
+          <option value="short">short</option>
+          <option value="medium" selected>medium</option>
+          <option value="detailed">detailed</option>
+        </select>
+        <button id="editToneBtn" class="ghost" disabled>Apply Tone</button>
+      </div>
+      <div style="margin-top:8px">
+        <label>Invite Template</label>
+        <textarea id="inviteTemplate" placeholder="Hi {name}, You're invited to {spouse}'s surprise on {date} at {venue} {time}. RSVP: {rsvp}"></textarea>
+        <div class="row" style="margin-top:6px">
+          <button id="editTextBtn" class="ghost" disabled>Save Template</button>
+          <button id="confirmSendBtn" disabled>Confirm Send</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="state">
+      <h2>Plan State</h2>
+      <div>Stage: <span class="badge" id="stage">-</span></div>
+      <div style="margin-top:6px">Next actions: <ul class="inline" id="nextActions"></ul></div>
+      <div style="margin-top:6px">Theme options: <ul class="inline" id="themes"></ul></div>
+      <div style="margin-top:6px">Venue options: <div id="venues"></div></div>
+      <div style="margin-top:6px">Time options: <ul class="inline" id="times"></ul></div>
+      <div style="margin-top:6px">Invitee suggestions: <ul class="inline" id="inviteSug"></ul></div>
+      <div style="margin-top:12px">
+        <h2>Invite Preview</h2>
+        <pre id="preview" style="white-space: pre-wrap"></pre>
+      </div>
+      <div style="margin-top:12px">
+        <h2>Raw Plan JSON</h2>
+        <pre id="raw"></pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const API = (path) => `http://localhost:8000${path}`;
+    let threadId = null;
+    let currentPlan = null;
+    let currentProfile = null;
+
+    // UI helpers
+    function set(el, val) { document.getElementById(el).textContent = val ?? ''; }
+    function val(el) { return document.getElementById(el).value; }
+    function byId(el) { return document.getElementById(el); }
+    function enable(id, on) { const b = byId(id); if (b) b.disabled = !on; }
+
+    function listToUl(id, arr) {
+      const target = byId(id); target.innerHTML = '';
+      (arr || []).forEach(x => {
+        const li = document.createElement('li'); li.textContent = typeof x === 'string' ? x : JSON.stringify(x);
+        target.appendChild(li);
+      });
+    }
+
+    function objectToDiv(id, obj) {
+      const div = byId(id); div.innerHTML = '';
+      if (!obj) return;
+      if (obj.restaurants || obj.home) {
+        if (obj.restaurants) {
+          const h = document.createElement('div'); h.textContent = 'Restaurants:'; h.className = 'muted'; div.appendChild(h);
+          const ul = document.createElement('ul'); ul.className = 'inline'; obj.restaurants.forEach(r => { const li = document.createElement('li'); li.textContent = r; ul.appendChild(li); }); div.appendChild(ul);
+        }
+        if (obj.home) {
+          const h2 = document.createElement('div'); h2.textContent = 'Home:'; h2.className = 'muted'; div.appendChild(h2);
+          const ul2 = document.createElement('ul'); ul2.className = 'inline'; obj.home.forEach(r => { const li = document.createElement('li'); li.textContent = r; ul2.appendChild(li); }); div.appendChild(ul2);
+        }
+      } else {
+        div.textContent = JSON.stringify(obj);
+      }
+    }
+
+    function populateSelect(id, options) {
+      const s = byId(id); s.innerHTML = '';
+      (options || []).forEach(opt => {
+        const o = document.createElement('option'); o.value = opt; o.textContent = opt; s.appendChild(o);
+      });
+    }
+
+    function populateVenueSelect(id, venueOptions) {
+      const s = byId(id); s.innerHTML = '';
+      const flat = [];
+      if (venueOptions?.restaurants) flat.push(...venueOptions.restaurants);
+      if (venueOptions?.home) flat.push(...venueOptions.home);
+      flat.forEach(opt => { const o = document.createElement('option'); o.value = opt; o.textContent = opt; s.appendChild(o); });
+    }
+
+    function renderPlan(plan) {
+      currentPlan = plan || {};
+      set('stage', plan?.stage || '-');
+      listToUl('nextActions', plan?.next_actions || []);
+      listToUl('themes', plan?.theme_options || []);
+      objectToDiv('venues', plan?.venue_options || null);
+      listToUl('times', plan?.time_options || []);
+      listToUl('inviteSug', plan?.invitee_suggestions || []);
+      byId('preview').textContent = plan?.invite_preview || '';
+      byId('inviteTemplate').value = plan?.invite_message_template || '';
+      byId('raw').textContent = JSON.stringify(plan || {}, null, 2);
+
+      populateSelect('themePick', plan?.theme_options || []);
+      populateVenueSelect('venuePick', plan?.venue_options || {});
+      populateSelect('timePick', plan?.time_options || []);
+
+      // Enable buttons based on next_actions
+      const acts = new Set(plan?.next_actions || []);
+      enable('changeThemeBtn', acts.has('change_theme'));
+      enable('changeVenueBtn', acts.has('change_venue'));
+      enable('confirmThemeVenueBtn', acts.has('confirm_theme_venue'));
+      enable('chooseTimeBtn', acts.has('choose_time'));
+      enable('changeDateBtn', acts.has('change_date'));
+      enable('addInviteesBtn', acts.has('add_invitees'));
+      enable('removeInviteesBtn', acts.has('remove_invitees'));
+      enable('confirmInviteesBtn', acts.has('confirm_invitees'));
+      enable('editToneBtn', acts.has('edit_invite_tone'));
+      enable('editTextBtn', acts.has('edit_invite_text'));
+      enable('confirmSendBtn', acts.has('confirm_send'));
+    }
+
+    async function fetchJson(url, opts) {
+      const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    }
+
+    async function loadProfiles() {
+      const data = await fetchJson(API('/api/profiles'));
+      const sel = byId('profileId'); sel.innerHTML='';
+      (data.profiles || []).forEach(p => { const o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o); });
+      currentProfile = sel.value;
+    }
+
+    async function startPlan() {
+      currentProfile = byId('profileId').value;
+      const payload = {
+        profile_id: currentProfile,
+        spouse_name: val('spouseName') || 'Wife',
+        event_date: val('eventDate') || null,
+        budget: Number(val('budget') || 10000),
+        invitees: []
+      };
+      const data = await fetchJson(API('/api/task/birthday'), { method: 'POST', body: JSON.stringify(payload) });
+      threadId = data.thread_id; set('thread', threadId);
+      byId('reloadBtn').disabled = false;
+      renderPlan(data.plan);
+    }
+
+    async function reloadPlan() {
+      if (!threadId) return;
+      const q = new URLSearchParams({ profile_id: currentProfile, thread_id: threadId }).toString();
+      const data = await fetchJson(API(`/api/nl/plan?${q}`));
+      renderPlan(data.plan);
+    }
+
+    async function sendAction(type, extra = {}) {
+      const payload = {
+        profile_id: currentProfile,
+        target: 'birthday',
+        thread_id: threadId,
+        utterance: '',
+        client_action: { type, ...extra }
+      };
+      const data = await fetchJson(API('/api/nl'), { method: 'POST', body: JSON.stringify(payload) });
+      if (data.thread_id) { threadId = data.thread_id; set('thread', threadId); }
+      renderPlan(data.plan);
+    }
+
+    // Wire buttons
+    byId('startBtn').addEventListener('click', () => startPlan().catch(err => alert(err)));
+    byId('reloadBtn').addEventListener('click', () => reloadPlan().catch(err => alert(err)));
+
+    byId('changeThemeBtn').addEventListener('click', () => sendAction('change_theme', { theme: val('themePick') }).catch(err => alert(err)));
+    byId('changeVenueBtn').addEventListener('click', () => sendAction('change_venue', { venue: val('venuePick') }).catch(err => alert(err)));
+    byId('confirmThemeVenueBtn').addEventListener('click', () => sendAction('confirm_theme_venue').catch(err => alert(err)));
+
+    byId('chooseTimeBtn').addEventListener('click', () => sendAction('choose_time', { time: val('timePick') }).catch(err => alert(err)));
+    byId('changeDateBtn').addEventListener('click', () => sendAction('change_date', { event_date: val('changeDate') }).catch(err => alert(err)));
+
+    function parseEmails(s) { return (s || '').split(',').map(x => x.trim()).filter(Boolean); }
+    byId('addInviteesBtn').addEventListener('click', () => sendAction('add_invitees', { emails: parseEmails(val('inviteEmails')) }).catch(err => alert(err)));
+    byId('removeInviteesBtn').addEventListener('click', () => sendAction('remove_invitees', { emails: parseEmails(val('inviteEmails')) }).catch(err => alert(err)));
+    byId('confirmInviteesBtn').addEventListener('click', () => sendAction('confirm_invitees').catch(err => alert(err)));
+
+    byId('editToneBtn').addEventListener('click', () => sendAction('edit_invite_tone', { style: val('toneStyle'), brevity: val('toneBrevity') }).catch(err => alert(err)));
+    byId('editTextBtn').addEventListener('click', () => sendAction('edit_invite_text', { template: byId('inviteTemplate').value }).catch(err => alert(err)));
+    byId('confirmSendBtn').addEventListener('click', () => sendAction('confirm_send').catch(err => alert(err)));
+
+    // Init
+    loadProfiles().catch(err => alert(err));
+  </script>
+</body>
+</html>

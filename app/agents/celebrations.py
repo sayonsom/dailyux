@@ -37,7 +37,6 @@ def run(profile, req):
     ctx = req.get("context", {})
     date = req.get("date")
     today = datetime.fromisoformat(date) if date else datetime.now()
-    is_weekend = bool(ctx.get("is_weekend"))
 
     fam = profile.get("meta", {}).get("family", [])
     col = profile.get("meta", {}).get("colleagues", [])
@@ -52,36 +51,29 @@ def run(profile, req):
 
     col_events: List[Dict[str, Any]] = []
     for c in col:
+        name = c.get("name")
         if c.get("birthday"):
-            col_events.append({"name": c.get("name"), "relation": c.get("role", "colleague"), "type": "birthday", "date": c["birthday"]})
+            col_events.append({"name": name, "relation": c.get("role", "colleague"), "type": "birthday", "date": c["birthday"]})
 
     upcoming_fam = _upcoming_within(14, today, fam_events)
     upcoming_col = _upcoming_within(14, today, col_events)
+    total = len(upcoming_fam) + len(upcoming_col)
 
-    if not upcoming_fam and not upcoming_col:
-        return None  # no card if nothing upcoming
+    if total == 0:
+        return AgentCard(
+            agent="CelebrationsAgent",
+            title="Celebrations",
+            summary="No family/colleague events in next 2 weeks.",
+            priority=7,
+            data={"upcoming_family": [], "upcoming_colleagues": []},
+        )
 
-    picks = (upcoming_fam[:2] or []) + ([upcoming_col[0]] if upcoming_col else [])
-    def _lab(e):
-        return f"{e['name']} ({e['type']}) in {e['days_left']}d"
-    summary = ", ".join(_lab(e) for e in picks)
-
-    actions = [
-        "Pick venue + budget",
-        "Draft invite list",
-        "Shortlist gift ideas",
-        "Block calendar for prep",
-    ]
-    prio = 2 if is_weekend else 4
+    first = (upcoming_fam + upcoming_col)[0]
+    who = f"{first['name']} ({first['type']}) in {first['days_left']}d"
     return AgentCard(
         agent="CelebrationsAgent",
         title="Upcoming Celebrations",
-        summary=summary,
-        priority=prio,
-        data={
-            "family": upcoming_fam,
-            "colleagues": upcoming_col,
-            "actions": actions,
-            "plan_endpoint": "/api/task/birthday",
-        },
+        summary=f"{total} upcoming; next: {who}",
+        priority=2,
+        data={"upcoming_family": upcoming_fam, "upcoming_colleagues": upcoming_col},
     )
