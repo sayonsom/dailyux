@@ -139,6 +139,21 @@ def _normalize_budget(val: Any) -> int:
     return 10000
 
 
+# Collect completed home-ops results for this profile
+
+def _collect_home_ops_results(profile_id: str) -> List[Dict[str, Any]]:
+    results: Dict[str, Dict[str, Any]] = {}
+    prefix = f"{profile_id}:birthday:"
+    for tid, plan in PLAN_STORE.items():
+        if not tid.startswith(prefix):
+            continue
+        ops = (plan or {}).get("ops", {}) or {}
+        for kind, res in ops.items():
+            # Keep latest by kind (simple overwrite is fine for demo)
+            results[kind] = {"kind": kind, "result": res}
+    return list(results.values())
+
+
 @app.get("/health")
 def health_check():
     """Health check endpoint for container orchestration"""
@@ -166,7 +181,10 @@ def plan_day(req: PlanRequest):
     ctx = compute_day_context(profile, date)
     order = router_order(profile, ctx)
 
-    init = {"messages": [], "profile": profile, "request": {"date": date, "context": ctx}, "now": datetime.now().isoformat(), "outputs": {}, "logs": []}
+    # Include any completed home-ops results for surfacing as cards
+    home_ops_results = _collect_home_ops_results(req.profile_id)
+
+    init = {"messages": [], "profile": profile, "request": {"date": date, "context": ctx, "home_ops_results": home_ops_results}, "now": datetime.now().isoformat(), "outputs": {}, "logs": []}
     # Checkpointer keys
     config = {"configurable": {"thread_id": f"{req.profile_id}:{date}", "checkpoint_ns": "plan_day"}}
 
@@ -397,245 +415,334 @@ def save_nl_plan(payload: Dict[str, Any]):
     PLAN_STORE[thread_id] = plan
     return {"ok": True, "thread_id": thread_id}
 
+# ---------------- Timeline simulation endpoints ----------------
+
+from app.schemas import SimTickRequest, SimTickResponse, SimStatusResponse, TimelineTask
+
+
+def _run_task(kind: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Simulate task execution; in real world, call sub-agents/tools."""
+    if kind == "decide_menu":
+        guests = len(plan.get("invitees", [])) or 8
+        veg = max(2, guests // 3)
+        dishes = ["Paneer Tikka", "Hakka Noodles", "Veg Biryani", "Chicken Kebab", "Gulab Jamun"]
+        return {"guests": guests, "veg": veg, "dishes": dishes}
+    if kind == "grocery_shopping":
+        menu = (plan.get("ops", {}) or {}).get("decide_menu") or {}
+        dishes = menu.get("dishes", ["Snacks", "Drinks"])
+        items = [f"Ingredients for {d}" for d in dishes] + ["Paper plates", "Napkins", "Soda", "Ice"]
+        return {"list": items, "ordered": True, "eta": "T-12h"}
+    if kind == "wifi_access":
+        ssid = f"Guest-{plan.get('spouse_name','Party')}"
+        return {"ssid": ssid, "password": "party@123", "qr": "data:image/png;base64,...."}
+    if kind == "secure_locks":
+        return {"locks_engaged": True, "time": datetime.now().isoformat()}
+    if kind == "post_cleanup":
+        return {"robot_started": True, "rooms": ["Living Room", "Dining", "Kitchen"], "duration_min": 60}
+    return {"ok": True}
+
+
+@app.get("/api/timeline/status", response_model=SimStatusResponse)
+def get_timeline_status(thread_id: str):
+    plan = _get_persisted_plan(thread_id)
+    if not plan:
+        raise HTTPException(404, f"No plan for thread_id {thread_id}")
+    tasks = plan.get("ops_timeline", [])
+    return SimStatusResponse(ok=True, thread_id=thread_id, now=datetime.now().isoformat(), tasks=[TimelineTask(**t) for t in tasks])
+
+
+@app.post("/api/timeline/tick", response_model=SimTickResponse)
+def tick_timeline(req: SimTickRequest):
+    plan = _get_persisted_plan(req.thread_id)
+    if not plan:
+        raise HTTPException(404, f"No plan for thread_id {req.thread_id}")
+    tasks: List[Dict[str, Any]] = plan.get("ops_timeline", []) or []
+    now = datetime.fromisoformat(req.now) if req.now else datetime.now()
+
+    processed: List[TimelineTask] = []
+    steps = 0
+    for t in tasks:
+        if steps >= req.maxSteps:
+            break
+        if t.get("status") != "scheduled":
+            continue
+        try:
+            sched = datetime.fromisoformat(t.get("scheduledAt"))
+        except Exception:
+            sched = now
+        if sched <= now:
+            t["status"] = "running"
+            result = _run_task(t.get("kind"), plan)
+            # accumulate in plan.ops
+            plan.setdefault("ops", {})
+            plan["ops"][t.get("kind")] = result
+            t["result"] = result
+            t["status"] = "done"
+            processed.append(TimelineTask(**t))
+            steps += 1
+
+    # Persist updates
+    plan["ops_timeline"] = tasks
+    PLAN_STORE[req.thread_id] = plan
+
+    remaining = len([t for t in tasks if t.get("status") == "scheduled"])
+    return SimTickResponse(ok=True, thread_id=req.thread_id, now=now.isoformat(), processed=processed, remaining=remaining)
+
 # ---------------- WebSocket: incremental card updates ----------------
+from app.schemas import (
+    BirthdayStartRequest, BirthdayPlanResponse, ThemeUpdateRequest, VenueUpdateRequest,
+    DateUpdateRequest, TimeUpdateRequest, BudgetUpdateRequest,
+    InviteesPutRequest, InviteesEmailsRequest, InvitesToneRequest, InvitesTextRequest,
+    OrchestrateRequest, OrchestrateResponse,
+)
+from app.recommendations.places_gateway import search_places
 
-# ---------------- Date/Time update endpoint ----------------
-from app.schemas import DateTimeUpdateRequest, DateTimeUpdateResponse
+# -------------- Helpers for organized endpoints --------------
+
+def _ensure_plan(thread_id: str, profile_id: str) -> Dict[str, Any]:
+    plan = _get_persisted_plan(thread_id)
+    if not plan:
+        raise HTTPException(404, f"No plan for thread_id {thread_id}")
+    # Attach profile_id for ops
+    plan.setdefault("profile_id", profile_id)
+    return plan
 
 
-def _validate_date_str(date_str: str) -> None:
-    try:
-        # Must be YYYY-MM-DD
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except Exception:
-        raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD.")
+def _advance_graph(thread_id: str, profile: Dict[str, Any], plan: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    state = {"messages": [], "profile": profile, "params": params, "plan": plan}
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "birthday"}}
+    result = BIRTHDAY_GRAPH.invoke(state, config=config)
+    plan = result.get("plan", plan)
+    PLAN_STORE[thread_id] = plan
+    return plan
 
 
-def _ensure_not_past(date_str: str) -> None:
-    d = datetime.strptime(date_str, "%Y-%m-%d").date()
-    if d < datetime.now().date():
-        raise HTTPException(400, "Date cannot be in the past.")
+# -------------- Organized REST: Birthday endpoints --------------
+
+@app.post("/api/birthdays", response_model=BirthdayPlanResponse)
+def birthday_start(req: BirthdayStartRequest):
+    profile = DEMO_PROFILES.get(req.profile_id)
+    if not profile:
+        raise HTTPException(404, f"Unknown profile_id {req.profile_id}")
+    # Reuse /api/task/birthday logic
+    spouse = req.spouse_name or _derive_spouse_name(profile) or "Spouse"
+    params = req.dict(); params["spouse_name"] = spouse
+    params["budget"] = _normalize_budget(params.get("budget"))
+    state = {"messages": [], "profile": profile, "params": params, "plan": {}}
+    thread_id = f"{req.profile_id}:birthday:{int(datetime.now().timestamp())}"
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "birthday"}}
+    result = BIRTHDAY_GRAPH.invoke(state, config=config)
+    plan = result.get("plan", {})
+    PLAN_STORE[thread_id] = plan
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
 
 
-@app.post("/api/datetime/update", response_model=DateTimeUpdateResponse)
-def datetime_update(req: DateTimeUpdateRequest):
+@app.get("/api/birthdays/{thread_id}", response_model=BirthdayPlanResponse)
+def birthday_get(thread_id: str, profile_id: str):
+    plan = _ensure_plan(thread_id, profile_id)
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.patch("/api/birthdays/{thread_id}/theme", response_model=BirthdayPlanResponse)
+def birthday_update_theme(thread_id: str, profile_id: str, req: ThemeUpdateRequest):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["theme"] = req.theme; plan["stage"] = "review_theme_venue"
+    plan = _advance_graph(thread_id, profile, plan, {})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.patch("/api/birthdays/{thread_id}/venue", response_model=BirthdayPlanResponse)
+def birthday_update_venue(thread_id: str, profile_id: str, req: VenueUpdateRequest):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["venue"] = req.venue; plan["stage"] = "review_theme_venue"
+    plan = _advance_graph(thread_id, profile, plan, {})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.patch("/api/birthdays/{thread_id}/date", response_model=BirthdayPlanResponse)
+def birthday_update_date(thread_id: str, profile_id: str, req: DateUpdateRequest):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["date"] = req.event_date
+    # reset scheduling bits
+    for k in ["availability","time_options","time"]:
+        plan.pop(k, None)
+    plan = _advance_graph(thread_id, profile, plan, {})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.patch("/api/birthdays/{thread_id}/time", response_model=BirthdayPlanResponse)
+def birthday_update_time(thread_id: str, profile_id: str, req: TimeUpdateRequest):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["time"] = req.time
+    plan = _advance_graph(thread_id, profile, plan, {})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.patch("/api/birthdays/{thread_id}/budget", response_model=BirthdayPlanResponse)
+def birthday_update_budget(thread_id: str, profile_id: str, req: BudgetUpdateRequest):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["budget"] = _normalize_budget(req.budget)
+    plan = _advance_graph(thread_id, profile, plan, {})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.put("/api/birthdays/{thread_id}/invitees", response_model=BirthdayPlanResponse)
+def birthday_put_invitees(thread_id: str, profile_id: str, req: InviteesPutRequest):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["invitees"] = list(dict.fromkeys(req.invitees))
+    plan = _advance_graph(thread_id, profile, plan, {"invitees": plan.get("invitees", [])})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.post("/api/birthdays/{thread_id}/invitees/add", response_model=BirthdayPlanResponse)
+def birthday_add_invitees(thread_id: str, profile_id: str, req: InviteesEmailsRequest):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan.setdefault("invitees", [])
+    for e in req.emails:
+        if e not in plan["invitees"]:
+            plan["invitees"].append(e)
+    plan = _advance_graph(thread_id, profile, plan, {"invitees": plan.get("invitees", [])})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.post("/api/birthdays/{thread_id}/invitees/remove", response_model=BirthdayPlanResponse)
+def birthday_remove_invitees(thread_id: str, profile_id: str, req: InviteesEmailsRequest):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    emails = set(req.emails)
+    plan["invitees"] = [e for e in plan.get("invitees", []) if e not in emails]
+    plan = _advance_graph(thread_id, profile, plan, {"invitees": plan.get("invitees", [])})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.post("/api/birthdays/{thread_id}/invitees/confirm", response_model=BirthdayPlanResponse)
+def birthday_confirm_invitees(thread_id: str, profile_id: str):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["stage"] = "invitees_confirmed"
+    plan = _advance_graph(thread_id, profile, plan, {})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.post("/api/birthdays/{thread_id}/invites/preview/tone", response_model=BirthdayPlanResponse)
+def birthday_invites_tone(thread_id: str, profile_id: str, req: InvitesToneRequest):
+    # Reuse existing NL helper to rewrite text
+    plan = _ensure_plan(thread_id, profile_id)
+    from app.tools.comms import rewrite_invite_template, render_invite_preview
+    style, brev = req.style, req.brevity
+    current = plan.get("invite_message_template") or "Hi {name},\nYou're invited to {spouse}'s surprise on {date} at {venue}. RSVP: {rsvp}"
+    constraints = {"spouse": plan.get("spouse_name","Spouse"), "date": plan.get("date","{date}"), "venue": plan.get("venue","{venue}")}
+    revised = rewrite_invite_template(style, brev, current, constraints)
+    plan["invite_message_template"] = revised
+    preview = render_invite_preview(revised, plan.get("invitees", []), {"spouse": constraints["spouse"], "date": constraints["date"], "venue": constraints["venue"], "rsvp": "https://example.com/rsvp"})
+    plan["invite_preview"] = preview
+    PLAN_STORE[thread_id] = plan
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.post("/api/birthdays/{thread_id}/invites/preview/text", response_model=BirthdayPlanResponse)
+def birthday_invites_text(thread_id: str, profile_id: str, req: InvitesTextRequest):
+    from app.tools.comms import render_invite_preview
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["invite_message_template"] = req.template
+    preview = render_invite_preview(req.template, plan.get("invitees", []), {"spouse": plan.get("spouse_name","Spouse"), "date": plan.get("date","{date}"), "venue": plan.get("venue","{venue}"), "rsvp": "https://example.com/rsvp"})
+    plan["invite_preview"] = preview
+    PLAN_STORE[thread_id] = plan
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.post("/api/birthdays/{thread_id}/invites/ready", response_model=BirthdayPlanResponse)
+def birthday_invites_ready(thread_id: str, profile_id: str):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["stage"] = "ready_to_send"
+    plan = _advance_graph(thread_id, profile, plan, {})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.post("/api/birthdays/{thread_id}/invites/send", response_model=BirthdayPlanResponse)
+def birthday_invites_send(thread_id: str, profile_id: str):
+    profile = DEMO_PROFILES.get(profile_id) or {}
+    plan = _ensure_plan(thread_id, profile_id)
+    plan["stage"] = "ready_to_send"
+    plan = _advance_graph(thread_id, profile, plan, {})
+    return BirthdayPlanResponse(thread_id=thread_id, plan=plan)
+
+
+@app.get("/api/birthdays/{thread_id}/timeline", response_model=SimStatusResponse)
+def birthday_timeline(thread_id: str, profile_id: str):
+    plan = _ensure_plan(thread_id, profile_id)
+    tasks = plan.get("ops_timeline", [])
+    return SimStatusResponse(ok=True, thread_id=thread_id, now=datetime.now().isoformat(), tasks=[TimelineTask(**t) for t in tasks])
+
+
+@app.post("/api/birthdays/{thread_id}/timeline/tick", response_model=SimTickResponse)
+def birthday_timeline_tick(thread_id: str, profile_id: str, req: SimTickRequest):
+    # Ensure we use the path thread_id, not the one in body
+    req.thread_id = thread_id
+    return tick_timeline(req)
+
+
+# ---------------- Master Orchestrator ----------------
+
+@app.post("/api/orchestrate/party", response_model=OrchestrateResponse)
+def orchestrate_party(req: OrchestrateRequest):
     profile = DEMO_PROFILES.get(req.profile_id)
     if not profile:
         raise HTTPException(404, f"Unknown profile_id {req.profile_id}")
 
-    plan = _get_persisted_plan(req.thread_id) or {}
-    if not plan:
-        # Create a seed plan so calendar node has context
-        plan = {"invitees": []}
+    # 1) Start plan
+    spouse = req.honoree_name or _derive_spouse_name(profile) or "Spouse"
+    start = BirthdayStartRequest(profile_id=req.profile_id, spouse_name=spouse, event_date=req.event_date, budget=req.budget or 10000, invitees=req.invitees)
+    start_resp = birthday_start(start)
+    tid = start_resp.thread_id
+    plan = start_resp.plan
 
-    action = req.action
+    # 2) Venue research if auto/restaurant
+    chosen_venue = plan.get("venue")
+    if req.venueMode in ("restaurant", "auto") and (not chosen_venue or chosen_venue.lower().startswith("home") is False):
+        # Try searching near profile home location (or default coords)
+        loc = (profile.get("homeLocation") or {})
+        lat = (loc.get("lat") or 37.7749); lng = (loc.get("lng") or -122.4194)
+        places = search_places({"lat": lat, "lng": lng, "radius": 3000, "query": "birthday dinner", "priceLevel": 3})
+        if places:
+            chosen_venue = places[0]["name"]
+            birthday_update_venue(tid, req.profile_id, VenueUpdateRequest(venue=chosen_venue))
+            plan = _get_persisted_plan(tid) or plan
 
-    if action == "change_date":
-        if not req.new_date:
-            raise HTTPException(400, "new_date is required for change_date action")
-        _validate_date_str(req.new_date)
-        _ensure_not_past(req.new_date)
-        # Update plan date and clear availability/time so graph recomputes
-        plan["date"] = req.new_date
-        plan.pop("availability", None)
-        plan.pop("time_options", None)
-        plan.pop("time", None)
-        message = "Changed date and refreshed options."
-    elif action == "refresh_times":
-        # Keep date as-is, just clear times to force refresh
-        if not plan.get("date"):
-            # If missing, try use current_date
-            if req.current_date:
-                _validate_date_str(req.current_date)
-                plan["date"] = req.current_date
-            else:
-                raise HTTPException(400, "current_date is required when plan has no date")
-        message = "Refreshed time options."
-        plan.pop("availability", None)
-        plan.pop("time_options", None)
-        plan.pop("time", None)
-    else:
-        raise HTTPException(400, "Unsupported action. Use change_date or refresh_times.")
+    # 3) If home explicitly requested, ensure Home is set
+    if req.venueMode == "home":
+        chosen_venue = "Home - Living room"
+        birthday_update_venue(tid, req.profile_id, VenueUpdateRequest(venue=chosen_venue))
+        plan = _get_persisted_plan(tid) or plan
 
-    # Re-run the graph to recompute availability/time options and dependents
-    state = {"messages": [], "profile": profile, "params": {"event_date": plan.get("date")}, "plan": plan}
-    config = {"configurable": {"thread_id": req.thread_id, "checkpoint_ns": "birthday"}}
-    result = BIRTHDAY_GRAPH.invoke(state, config=config)
-    updated = result.get("plan", plan)
+    # 4) Pick a time (prefer 19:00 if available)
+    time_opts = plan.get("time_options", [])
+    pick = next((t for t in time_opts if t >= "18:30"), time_opts[0] if time_opts else "19:00")
+    birthday_update_time(tid, req.profile_id, TimeUpdateRequest(time=pick))
+    plan = _get_persisted_plan(tid) or plan
 
-    # Error case: no availability -> time options could be empty
-    if not updated.get("time_options"):
-        # Provide a graceful message; still return plan so UI can react
-        msg = "No time slots available for the selected date. Try another date."
-    else:
-        msg = message
+    # 5) Confirm theme/venue
+    birthday_update_theme(tid, req.profile_id, ThemeUpdateRequest(theme=plan.get("theme") or "Warm & Minimal"))
+    plan = _get_persisted_plan(tid) or plan
+    birthday_invites_ready(tid, req.profile_id)
+    plan = _get_persisted_plan(tid) or plan
+    birthday_invites_send(tid, req.profile_id)
+    plan = _get_persisted_plan(tid) or plan
 
-    PLAN_STORE[req.thread_id] = updated
-    return DateTimeUpdateResponse(ok=True, message=msg, plan=updated, thread_id=req.thread_id)
+    # 6) Optionally accelerate timeline
+    notes = None
+    if req.accelerateTo:
+        tick = SimTickRequest(thread_id=tid, now=req.accelerateTo, maxSteps=10)
+        tick_timeline(tick)
+        plan = _get_persisted_plan(tid) or plan
+        notes = f"Advanced timeline to {req.accelerateTo}"
 
-# ---------------- v1: Recommendations API ----------------
-from app.schemas import (
-    ProfileModel, EventModel, Theme, Venue, RecommendationsRequest, RecommendationsResponse,
-    CreateJobRequest, JobStatusResponse, FeedbackRequest, VenuesSearchRequest,
-)
-from app.recommendations.places_gateway import search_places
-from app.recommendations.llm_orchestrator import generate_themes, rerank_venues, MODEL_VERSION
-
-# In-memory stores (replace with DB/Redis)
-_PROFILE_STORE: Dict[str, Dict[str, Any]] = {}
-_EVENT_STORE: Dict[str, Dict[str, Any]] = {}
-_RECS_STORE: Dict[str, Dict[str, Any]] = {}
-_FEEDBACK_STORE: List[Dict[str, Any]] = []
-_JOBS: Dict[str, Dict[str, Any]] = {}
-
-
-def _now_ts() -> int:
-    return int(datetime.now().timestamp())
-
-
-@app.post("/api/v1/profiles")
-def v1_upsert_profile(profile: ProfileModel):
-    _PROFILE_STORE[profile.profileId] = json.loads(profile.model_dump_json())
-    return {"ok": True}
-
-
-@app.post("/api/v1/events")
-def v1_create_event(event: EventModel):
-    if not event.eventId:
-        event.eventId = f"evt_{_now_ts()}"
-    # Basic derive age if possible
-    prof = _PROFILE_STORE.get(event.profileId) or DEMO_PROFILES.get(event.profileId, {})
-    b = (prof or {}).get("birthdate")
-    if b and event.targetDate and len(b) >= 10:
-        try:
-            bd = datetime.fromisoformat(b[:10]).date()
-            td = datetime.fromisoformat(event.targetDate[:10]).date()
-            event.computedAgeAtEvent = td.year - bd.year - ((td.month, td.day) < (bd.month, bd.day))
-        except Exception:
-            pass
-    _EVENT_STORE[event.eventId] = json.loads(event.model_dump_json())
-    return {"ok": True, "eventId": event.eventId}
-
-
-def _pull_profile_event(eventId: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    ev = _EVENT_STORE.get(eventId)
-    if not ev:
-        raise HTTPException(404, f"Unknown eventId {eventId}")
-    prof = _PROFILE_STORE.get(ev["profileId"]) or DEMO_PROFILES.get(ev["profileId"]) or {}
-    return prof, ev
-
-
-@app.post("/api/v1/events/{eventId}/recommendations", response_model=RecommendationsResponse)
-def v1_recommendations(eventId: str, req: RecommendationsRequest):
-    profile, event = _pull_profile_event(eventId)
-
-    # Cache key
-    cache_key = json.dumps({"profileId": event.get("profileId"), "eventId": eventId, "k1": req.topKThemes, "k2": req.topKVenues}, sort_keys=True)
-    if not req.forceRefresh and cache_key in _RECS_STORE:
-        payload = _RECS_STORE[cache_key]
-        return RecommendationsResponse(**payload)
-
-    # 1) Themes via LLM (k-1) and append a deterministic Home/Quiet theme
-    k_llm = max(1, req.topKThemes - 1)
-    from app.recommendations.llm_orchestrator import rerank_themes, make_home_theme, build_query_from_theme, price_from_budget
-    themes = generate_themes(profile, event, n=max(5, k_llm))
-    themes_ranked = rerank_themes(themes, profile, event)
-    quiet_home = make_home_theme(event)
-    top_themes = (themes_ranked[:k_llm] + [quiet_home])[: req.topKThemes]
-
-    # 2) For the best non-home theme, fetch venues with theme-aware query
-    used_tools = ["llm.generate_themes", "places.search", "llm.rerank_venues"]
-    venues_all: List[Dict[str, Any]] = []
-
-    # Prefer precise lat/lng from profile.homeLocation if present; ignore cityOverride string here
-    home = profile.get("homeLocation") or {}
-    lat = (home.get("lat") if isinstance(home, dict) else None) or 12.9716
-    lng = (home.get("lng") if isinstance(home, dict) else None) or 77.5946
-    radius = int(((event.get("radiusKm") or 3) * 1000))
-
-    best_theme = next((t for t in top_themes if t.get("id") != "theme_home_quiet"), None) or top_themes[0]
-    if best_theme.get("id") != "theme_home_quiet":
-        query = build_query_from_theme(best_theme, event)
-        cuisines = (profile.get("preferences") or {}).get("cuisinesLiked") or []
-        params = {
-            "query": query,
-            "lat": lat,
-            "lng": lng,
-            "radius": radius,
-            "priceLevel": price_from_budget(event.get("budgetPerPerson")),
-            "cuisine": cuisines[0] if cuisines else None,
-        }
-        results = search_places(params)
-        for r in results:
-            r["themeId"] = best_theme.get("id")
-            venues_all.append(r)
-
-        # 3) Rerank globally with LLM by best theme match per venue
-        reranked = rerank_venues(profile, event, best_theme, venues_all, top_k=req.topKVenues)
-    else:
-        reranked = []
-
-    resp = RecommendationsResponse(
-        themes=[Theme(**t) for t in top_themes],
-        venues=[Venue(**v) for v in reranked],
-        usedTools=used_tools,
-        modelVersion=MODEL_VERSION,
-        ttlSeconds=2 * 60,
-        recId=f"rec_{_now_ts()}"
-    )
-    _RECS_STORE[cache_key] = json.loads(resp.model_dump_json())
-    return resp
-
-
-@app.post("/api/v1/recommendation-jobs")
-def v1_create_job(req: CreateJobRequest):
-    job_id = f"job_{_now_ts()}"
-    _JOBS[job_id] = {"status": "pending", "req": json.loads(req.model_dump_json())}
-
-    async def _run():
-        _JOBS[job_id]["status"] = "running"
-        try:
-            r = await _compute_recs_async(req.eventId, req.topKThemes, req.topKVenues)
-            _JOBS[job_id]["status"] = "complete"
-            _JOBS[job_id]["result"] = r
-        except Exception as e:
-            _JOBS[job_id]["status"] = "failed"
-            _JOBS[job_id]["error"] = str(e)
-
-    asyncio.create_task(_run())
-    return {"jobId": job_id}
-
-
-async def _compute_recs_async(eventId: str, k1: int, k2: int) -> Dict[str, Any]:
-    # Simple awaitable wrapper that uses sync function
-    loop = asyncio.get_event_loop()
-    def _sync():
-        payload = v1_recommendations(eventId, RecommendationsRequest(topKThemes=k1, topKVenues=k2, forceRefresh=True))
-        return json.loads(payload.model_dump_json())
-    return await loop.run_in_executor(None, _sync)
-
-
-@app.get("/api/v1/recommendation-jobs/{jobId}", response_model=JobStatusResponse)
-def v1_job_status(jobId: str):
-    job = _JOBS.get(jobId)
-    if not job:
-        raise HTTPException(404, "jobId not found")
-    res = job.get("result")
-    return JobStatusResponse(jobId=jobId, status=job["status"], result=RecommendationsResponse(**res) if res else None, error=job.get("error"))
-
-
-@app.post("/api/v1/recommendations/{recId}/feedback")
-def v1_feedback(recId: str, req: FeedbackRequest):
-    _FEEDBACK_STORE.append({"recId": recId, **json.loads(req.model_dump_json()), "ts": _now_ts()})
-    return {"ok": True}
-
-
-@app.get("/api/v1/venues/search")
-def v1_venues_search(lat: float, lng: float, radius: int = 3000, query: Optional[str] = None, cuisines: Optional[str] = None, priceLevel: Optional[int] = None):
-    params: Dict[str, Any] = {"lat": lat, "lng": lng, "radius": radius, "query": query or "restaurant"}
-    if cuisines:
-        params["cuisine"] = cuisines.split(",")[0]
-    if priceLevel is not None:
-        params["priceLevel"] = priceLevel
-    res = search_places(params)
-    return {"results": res}
+    return OrchestrateResponse(ok=True, thread_id=tid, plan=plan, notes=notes)

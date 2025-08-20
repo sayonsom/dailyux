@@ -8,6 +8,8 @@ from app.agents import getting_started, traffic, work_life, fitness, hobby, life
 from app.agents import nutrition, finance_errands, learning, celebrations
 from app.tools.calendar import calendar_lookup
 from app.llm.llm import generate_bullets
+# Home ops agent to surface async tasks
+from app.agents import home_ops
 
 PlannerState = Dict[str, Any]
 
@@ -174,6 +176,10 @@ def router_order(profile: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
         else:
             seq.insert(len(seq)-1, "life_after_work")
 
+    # Always include home_ops at the end; it will be a no-op if nothing to surface
+    if "home_ops" not in seq:
+        seq.append("home_ops")
+
     # Ensure uniqueness and valid names
     seen, out = set(), []
     for s in seq:
@@ -222,6 +228,20 @@ def node_celebrations(state: PlannerState):
         state["outputs"]["cards"].append(card.dict())
     return state
 
+# Home ops node: turns completed ops tasks into cards
+
+def node_home_ops(state: PlannerState):
+    req = state.get("request", {})
+    results = req.get("home_ops_results", []) or []
+    if not results:
+        return state
+    for r in results:
+        kind = r.get("kind")
+        result = r.get("result", {})
+        card = home_ops.run(state["profile"], {"kind": kind, "result": result})
+        state["outputs"]["cards"].append(card.dict())
+    return state
+
 # ---------------- Prompt helpers ----------------
 
 def make_supervisor_bullets_prompt(profile: Dict[str, Any], ctx: Dict[str, Any]) -> str:
@@ -255,8 +275,8 @@ def supervisor_insights(profile: Dict[str, Any], ctx: Dict[str, Any], *, bullets
     return AgentCard(agent="SupervisorAgent", title="Planner Insights", summary=summary, priority=0, data={"insights": bullets, "focus_windows": fw, "load": load, "role": role})
 
 # Fallback linear variants so all edges exist
-LINEAR_A = ["getting_started","celebrations","traffic","work_life","nutrition","learning","fitness","finance_errands","hobby","life_after_work","relaxation"]
-LINEAR_B = ["getting_started","celebrations","work_life","traffic","nutrition","learning","hobby","life_after_work","fitness","finance_errands","relaxation"]
+LINEAR_A = ["getting_started","celebrations","traffic","work_life","nutrition","learning","fitness","finance_errands","hobby","life_after_work","relaxation","home_ops"]
+LINEAR_B = ["getting_started","celebrations","work_life","traffic","nutrition","learning","hobby","life_after_work","fitness","finance_errands","relaxation","home_ops"]
 
 NODE_FUN = {
     "getting_started": node_getting_started,
@@ -271,6 +291,7 @@ NODE_FUN = {
     "finance_errands": node_finance_errands,
     "learning": node_learning,
     "celebrations": node_celebrations,
+    "home_ops": node_home_ops,
 }
 
 # ---------------- Legacy graph (kept for compatibility) ----------------

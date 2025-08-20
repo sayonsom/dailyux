@@ -260,3 +260,94 @@ class VenuesSearchRequest(BaseModel):
     priceLevel: Optional[int] = None  # 1-4 (google) or 1-4 (mapped)
     openAt: Optional[str] = None
     accessibility: List[str] = Field(default_factory=list)
+
+# ---------------- Simulation / Timeline models ----------------
+
+class TimelineTask(BaseModel):
+    id: str
+    kind: Literal[
+        "decide_menu",
+        "grocery_shopping",
+        "wifi_access",
+        "post_cleanup",
+        "secure_locks",
+    ]
+    title: str
+    scheduledAt: str  # ISO datetime
+    dueAt: Optional[str] = None
+    status: Literal["scheduled", "running", "done", "failed", "skipped"] = "scheduled"
+    notes: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+
+class SimTickRequest(BaseModel):
+    thread_id: str
+    now: Optional[str] = None  # ISO datetime; if omitted, server now()
+    maxSteps: int = 10
+
+class SimTickResponse(BaseModel):
+    ok: bool
+    thread_id: str
+    now: str
+    processed: List[TimelineTask] = Field(default_factory=list)
+    remaining: int = 0
+
+class SimStatusResponse(BaseModel):
+    ok: bool
+    thread_id: str
+    now: Optional[str] = None
+    tasks: List[TimelineTask] = Field(default_factory=list)
+
+# ---------------- Organized REST: Birthday endpoints ----------------
+
+class BirthdayStartRequest(BirthdayPlanRequest):
+    pass
+
+class BirthdayPlanResponse(BaseModel):
+    thread_id: str
+    plan: Dict[str, Any]
+
+class ThemeUpdateRequest(BaseModel):
+    theme: str
+
+class VenueUpdateRequest(BaseModel):
+    venue: str
+
+class DateUpdateRequest(BaseModel):
+    event_date: str
+
+class TimeUpdateRequest(BaseModel):
+    time: str
+
+class BudgetUpdateRequest(BaseModel):
+    budget: Union[int, str]
+
+class InviteesPutRequest(BaseModel):
+    invitees: List[str]
+
+class InviteesEmailsRequest(BaseModel):
+    emails: List[str]
+
+class InvitesToneRequest(BaseModel):
+    style: Tone
+    brevity: Brevity
+
+class InvitesTextRequest(BaseModel):
+    template: str
+
+# ---------------- Master Orchestrator ----------------
+
+class OrchestrateRequest(BaseModel):
+    profile_id: str
+    honoree_name: Optional[str] = None  # pick from profile if missing
+    relation: Optional[str] = None
+    event_date: str
+    venueMode: Literal["home", "restaurant", "auto"] = "auto"
+    budget: Optional[Union[int, str]] = None
+    invitees: List[str] = Field(default_factory=list)
+    accelerateTo: Optional[str] = None  # ISO datetime to advance timeline
+
+class OrchestrateResponse(BaseModel):
+    ok: bool
+    thread_id: str
+    plan: Dict[str, Any]
+    notes: Optional[str] = None
